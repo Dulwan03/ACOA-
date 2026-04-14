@@ -2,10 +2,13 @@ import os
 import time
 import psutil
 
+# Get the project base directory (where main.py is located)
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def ensure_directories():
-    os.makedirs("outputs/images", exist_ok=True)
-    os.makedirs("outputs/graphs", exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_DIR, "outputs/images"), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_DIR, "outputs/graphs"), exist_ok=True)
 
 
 def calculate_speedup(sequential_time: float, parallel_time: float) -> float:

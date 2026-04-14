@@ -57,26 +57,34 @@
                     </button>
                 </div>
 
-                <!-- ========== PARAMETERS ========== -->
-                <div class="parameters-section">
-                    <h3>Configuration Parameters</h3>
-                    <div class="parameter-inputs">
-                        <div class="param-group">
-                            <label for="paramWorkers">Workers (1-16):</label>
-                            <input type="number" id="paramWorkers" min="1" max="16" value="4">
-                        </div>
-                        <div class="param-group">
-                            <label for="paramIterations">Iterations (1-1000):</label>
-                            <input type="number" id="paramIterations" min="1" max="1000" value="100">
-                        </div>
-                    </div>
-                </div>
-
                 <!-- ========== ACTION BUTTONS ========== -->
                 <div class="action-buttons">
                     <button id="runAllBtn" class="btn btn-primary"><i class="fas fa-play"></i> Run All Modules</button>
                     <button id="stopBtn" class="btn btn-danger" disabled><i class="fas fa-stop-circle"></i> Stop</button>
                     <button id="resetBtn" class="btn btn-secondary"><i class="fas fa-redo"></i> Reset</button>
+                </div>
+
+                <!-- ========== IMAGE UPLOAD SECTION ========== -->
+                <div class="upload-section">
+                    <h3>Upload Output Images</h3>
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-content">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <h4>Drag & Drop Images Here</h4>
+                            <p>or click to select files</p>
+                            <p class="upload-info">Allowed: JPG, PNG, GIF, BMP (Max 10MB each, 5 files)</p>
+                        </div>
+                    </div>
+                    <input type="file" id="imageInput" hidden multiple accept="image/jpeg,image/png,image/gif,image/bmp">
+                    
+                    <div class="uploaded-images" id="uploadedImages">
+                        <p class="empty-state">No images selected</p>
+                    </div>
+                    
+                    <div class="upload-actions">
+                        <button id="uploadBtn" class="btn btn-primary" disabled><i class="fas fa-upload"></i> Upload Images</button>
+                        <button id="clearUploadBtn" class="btn btn-secondary"><i class="fas fa-trash"></i> Clear</button>
+                    </div>
                 </div>
             </section>
 
@@ -126,8 +134,23 @@
                 </div>
             </section>
 
+            <!-- ========== OUTPUT IMAGES SECTION ========== -->
+            <section class="output-images-section">
+                <div class="section-header" id="outputImagesHeader">
+                    <h2><i class="fas fa-images"></i> Output Images</h2>
+                    <button class="toggle-btn" id="toggleOutputImages" title="Toggle output images">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
+                <div class="section-content" id="outputImagesContent">
+                    <div class="output-images-grid" id="outputImagesGrid">
+                        <p class="empty-state">No processed images available yet. Run an experiment to generate output.</p>
+                    </div>
+                </div>
+            </section>
+
             <!-- ========== GRAPHS SECTION ========== -->
-            <section class="graphs-section">
+            <section class="graphs-section" id="graphsContainer">
                 <h2><i class="fas fa-chart-pie"></i> Performance Metrics</h2>
                 <div class="graphs-grid">
                     <div class="graph-card">

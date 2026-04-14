@@ -60,6 +60,9 @@ function initializeEventListeners() {
             closeModal();
         }
     });
+
+    // Initialize collapsible output images
+    initializeCollapsibleOutputImages();
 }
 
 // ============= MAIN FUNCTIONS =============
@@ -70,12 +73,11 @@ async function runExperiment(moduleName) {
     }
 
     const params = {
-        workers: parseInt(document.getElementById('paramWorkers').value) || 4,
-        iterations: parseInt(document.getElementById('paramIterations').value) || 100
     };
 
     try {
         disableAllControls();
+        showProcessingStatus(moduleName);
         log(`Starting ${moduleName} experiment...`, 'info');
 
         const response = await fetch(`${API_BASE}/run-experiment`, {
@@ -94,11 +96,13 @@ async function runExperiment(moduleName) {
         }
 
         const data = await response.json();
-        log(`${moduleName} experiment started successfully`, 'success');
+        const imageSource = data.image_used === 'uploaded' ? 'uploaded image' : 'default image (data/input.jpg)';
+        log(`${moduleName} experiment started using ${imageSource}`, 'success');
         startStatusMonitoring();
 
     } catch (error) {
         log(`Error starting experiment: ${error.message}`, 'error');
+        hideProcessingStatus();
         enableAllControls();
     }
 }
@@ -106,11 +110,10 @@ async function runExperiment(moduleName) {
 async function runAllModules() {
     const modules = ['parallelism', 'scheduling', 'bus', 'cache'];
     const params = {
-        workers: parseInt(document.getElementById('paramWorkers').value) || 4,
-        iterations: parseInt(document.getElementById('paramIterations').value) || 100
     };
 
     disableAllControls();
+    showProcessingStatus('All Modules');
     log('🚀 Starting batch execution of all modules...', 'info');
 
     try {
@@ -147,12 +150,16 @@ async function runAllModules() {
                     })
                 });
 
+                const data = await response.json();
+                
                 if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.error || `Failed to start ${module}`);
+                    throw new Error(data.error || `Failed to start ${module}`);
                 }
 
-                log(`${module} experiment started`, 'info');
+                const imageSource = module === 'parallelism' 
+                    ? (data.image_used === 'uploaded' ? ' (uploaded image)' : ' (default image)')
+                    : '';
+                log(`${module} experiment started${imageSource}`, 'info');
                 
                 // Start monitoring for this module
                 startStatusMonitoring();
@@ -164,6 +171,11 @@ async function runAllModules() {
                 
                 // Stop monitoring before next module
                 stopStatusMonitoring();
+                
+                // Refresh output images after each module completes (especially for parallelism)
+                if (module === 'parallelism') {
+                    await loadOutputImages();
+                }
                 
                 // Add a small delay between modules
                 if (i < modules.length - 1) {
@@ -198,6 +210,7 @@ async function stopExecution() {
         if (response.ok) {
             log('Execution stopped by user', 'warning');
             stopStatusMonitoring();
+            hideProcessingStatus();
             enableAllControls();
         }
     } catch (error) {
@@ -213,6 +226,7 @@ async function resetExecution() {
 
         if (response.ok) {
             stopStatusMonitoring();
+            hideProcessingStatus();
             clearResults();
             updateStatus('idle', 'Ready');
             document.getElementById('progressFill').style.width = '0%';
@@ -278,8 +292,18 @@ async function updateExecutionStatus() {
         // Handle completion
         if (status.status === 'completed' || status.status === 'error') {
             stopStatusMonitoring();
+            hideProcessingStatus();
             enableAllControls();
+            
+            // Load output images after completion
             if (status.status === 'completed') {
+                loadOutputImages();
+                
+                // Auto-refresh graphs for parallelism module
+                if (status.module === 'parallelism') {
+                    await refreshGraphs();
+                }
+                
                 log(`${status.module} experiment completed successfully`, 'success');
             } else {
                 log(`${status.module} experiment failed: ${status.error}`, 'error');
@@ -949,7 +973,8 @@ async function uploadImages() {
         
         if (result.uploaded > 0) {
             clearUploadArea();
-            // Optionally refresh graphs to show newly uploaded images
+            // Load and display output images
+            loadOutputImages();
             log('Images saved to output folder', 'success');
         }
 
@@ -958,4 +983,217 @@ async function uploadImages() {
     } finally {
         document.getElementById('uploadBtn').disabled = selectedFiles.length === 0;
     }
+}
+
+// ============= VALIDATION FUNCTIONS =============
+function showValidationMessage(message, type = 'error') {
+    const controlPanel = document.querySelector('.control-panel');
+    
+    // Remove existing message
+    const existingMsg = controlPanel.querySelector('.form-validation-msg');
+    if (existingMsg) {
+        existingMsg.remove();
+    }
+    
+    // Create new message
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `form-validation-msg ${type}`;
+    
+    const icon = type === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle';
+    msgDiv.innerHTML = `
+        <i class="fas ${icon}"></i>
+        <span>${message}</span>
+    `;
+    
+    controlPanel.insertBefore(msgDiv, controlPanel.firstChild);
+    
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        msgDiv.style.animation = 'slideDown 0.3s ease-out reverse';
+        setTimeout(() => msgDiv.remove(), 300);
+    }, 5000);
+}
+
+// ============= PROCESSING STATUS FUNCTIONS =============
+function showProcessingStatus(moduleName) {
+    const progressSection = document.querySelector('.progress-section');
+    
+    // Remove existing status if any
+    const existingStatus = progressSection.querySelector('.processing-status');
+    if (existingStatus) {
+        existingStatus.remove();
+    }
+    
+    // Create new status
+    const statusDiv = document.createElement('div');
+    statusDiv.className = 'processing-status';
+    statusDiv.innerHTML = `
+        <div class="processing-spinner"></div>
+        <div class="processing-text">
+            Processing images with <span class="module-name">${moduleName}</span> module...
+        </div>
+    `;
+    
+    progressSection.insertBefore(statusDiv, progressSection.firstChild);
+}
+
+function hideProcessingStatus() {
+    const statusDiv = document.querySelector('.processing-status');
+    if (statusDiv) {
+        statusDiv.style.animation = 'slideDown 0.3s ease-out reverse';
+        setTimeout(() => statusDiv.remove(), 300);
+    }
+}
+
+// ============= OUTPUT IMAGES FUNCTIONS =============
+async function loadOutputImages() {
+    try {
+        // List all output images from the server with cache-busting parameter
+        const cacheBuster = new Date().getTime();
+        const response = await fetch(`${API_BASE}/list-output-images?t=${cacheBuster}`, {
+            cache: 'no-store'
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to fetch output images');
+        }
+        
+        const data = await response.json();
+        displayOutputImages(data.images || []);
+        
+    } catch (error) {
+        console.error('Error loading output images:', error);
+        log(`Could not load output images: ${error.message}`, 'warning');
+    }
+}
+
+function displayOutputImages(images) {
+    const grid = document.getElementById('outputImagesGrid');
+    
+    if (!images || images.length === 0) {
+        grid.innerHTML = '<p class="empty-state">No processed images available yet.</p>';
+        grid.classList.add('empty');
+        return;
+    }
+    
+    // Filter to show only processed images (those starting with "output_")
+    const processedImages = images.filter(imagePath => {
+        const fileName = imagePath.split('/').pop() || imagePath;
+        return fileName.startsWith('output_');
+    });
+    
+    if (processedImages.length === 0) {
+        grid.innerHTML = '<p class="empty-state">No processed images available yet. Run an experiment to generate grayscale outputs.</p>';
+        grid.classList.add('empty');
+        return;
+    }
+    
+    grid.innerHTML = '';
+    grid.classList.remove('empty');
+    
+    // Show all processed images
+    processedImages.forEach(imagePath => {
+        const fileName = imagePath.split('/').pop() || imagePath;
+        
+        const card = document.createElement('div');
+        card.className = 'output-image-card';
+        card.innerHTML = `
+            <img src="${imagePath}" alt="${fileName}" />
+            <div class="output-image-overlay">
+                <button class="image-action-btn" title="View full size" onclick="openFullscreenImage('${imagePath}', '${fileName}')">
+                    <i class="fas fa-expand"></i>
+                </button>
+                <button class="image-action-btn" title="Download" onclick="downloadImage('${imagePath}', '${fileName}')">
+                    <i class="fas fa-download"></i>
+                </button>
+            </div>
+            <div class="output-image-info">${fileName}</div>
+        `;
+        
+        grid.appendChild(card);
+    });
+}
+
+function openFullscreenImage(imagePath, fileName) {
+    const modal = document.createElement('div');
+    modal.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.95);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10000;
+        cursor: pointer;
+        animation: fadeIn 0.3s ease;
+    `;
+    
+    const img = document.createElement('img');
+    img.src = imagePath;
+    img.style.cssText = `
+        max-width: 90%;
+        max-height: 90%;
+        border-radius: 12px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    `;
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.innerHTML = '✕';
+    closeBtn.style.cssText = `
+        position: absolute;
+        top: 30px;
+        right: 30px;
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        border: 2px solid white;
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        font-size: 1.5rem;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        z-index: 10001;
+    `;
+    
+    closeBtn.onmouseover = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.2)';
+    closeBtn.onmouseout = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.1)';
+    
+    const close = () => {
+        modal.style.animation = 'fadeOut 0.3s ease';
+        setTimeout(() => modal.remove(), 300);
+    };
+    
+    closeBtn.onclick = close;
+    modal.onclick = close;
+    img.onclick = (e) => e.stopPropagation();
+    
+    modal.appendChild(img);
+    modal.appendChild(closeBtn);
+    document.body.appendChild(modal);
+}
+
+function downloadImage(imagePath, fileName) {
+    const a = document.createElement('a');
+    a.href = imagePath;
+    a.download = fileName || 'image.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    log(`Downloading ${fileName}...`, 'success');
+}
+
+function initializeCollapsibleOutputImages() {
+    const header = document.getElementById('outputImagesHeader');
+    const content = document.getElementById('outputImagesContent');
+    const toggleBtn = document.getElementById('toggleOutputImages');
+    
+    if (!header) return;
+    
+    header.addEventListener('click', () => {
+        content.classList.toggle('collapsed');
+        toggleBtn.classList.toggle('collapsed');
+    });
 }

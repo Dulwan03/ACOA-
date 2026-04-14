@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request, send_file, make_response
 from flask_cors import CORS
 import sys
 import os
@@ -13,18 +13,37 @@ import zipfile
 import glob
 from contextlib import redirect_stdout
 
+# Set environment variables for faster web UI execution
+os.environ.setdefault('CACHE_LOOPS', '50000')
+os.environ.setdefault('BUS_TRANSFER_TIME', '0.02')
+
 # Add parent directory to path to import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from modules.parallelism_module import run_parallelism_experiment
-from modules.scheduling_module import run_scheduling_experiment
-from modules.bus_module import run_bus_experiment
-from modules.cache_module import run_cache_experiment
-from modules.performance_module import plot_parallelism_results, print_results
 from utils import ensure_directories
 
+# Import functions lazily to avoid multiprocessing spawn issues on Windows
+def _lazy_import_modules():
+    """Lazy import to prevent multiprocessing spawn issues"""
+    from modules.parallelism_module import run_parallelism_experiment
+    from modules.scheduling_module import run_scheduling_experiment
+    from modules.bus_module import run_bus_experiment
+    from modules.cache_module import run_cache_experiment
+    from modules.performance_module import plot_parallelism_results, print_results
+    return run_parallelism_experiment, run_scheduling_experiment, run_bus_experiment, run_cache_experiment, plot_parallelism_results, print_results
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
-CORS(app)
+
+# Configure CORS with explicit settings
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": False,
+        "max_age": 3600
+    }
+})
 
 # Ensure output directories exist
 ensure_directories()
@@ -47,15 +66,20 @@ current_execution = {
 
 class ExecutionThread(threading.Thread):
     """Thread for running experiments without blocking the Flask app"""
-    def __init__(self, module_name, parameters=None):
+    def __init__(self, module_name, parameters=None, image_path=None):
         super().__init__(daemon=True)
         self.module_name = module_name
         self.parameters = parameters or {}
+        self.image_path = image_path
         self.results = None
         self.error = None
 
     def run(self):
         try:
+            # Lazy import here to avoid multiprocessing spawn issues
+            run_parallelism_experiment, run_scheduling_experiment, run_bus_experiment, \
+            run_cache_experiment, plot_parallelism_results, print_results = _lazy_import_modules()
+            
             current_execution['status'] = 'running'
             current_execution['module'] = self.module_name
             current_execution['progress'] = 10
@@ -67,15 +91,22 @@ class ExecutionThread(threading.Thread):
             try:
                 with redirect_stdout(output_buffer):
                     if self.module_name == 'parallelism':
-                        run_parallelism_experiment()
+                        run_parallelism_experiment(input_image_path=self.image_path)
+                        # Generate graphs after parallelism experiment completes
+                        plot_parallelism_results()
                     elif self.module_name == 'scheduling':
                         run_scheduling_experiment()
                     elif self.module_name == 'bus':
                         run_bus_experiment()
                     elif self.module_name == 'cache':
                         run_cache_experiment()
+                    
+                    # Ensure output is flushed
+                    sys.stdout.flush()
             except Exception as e:
-                output_buffer.write(f"\nError during execution: {str(e)}")
+                import traceback
+                output_buffer.write(f"\nError during execution: {str(e)}\n")
+                output_buffer.write(traceback.format_exc())
             
             # Store captured output as results
             self.results = output_buffer.getvalue()
@@ -88,15 +119,24 @@ class ExecutionThread(threading.Thread):
                 current_execution['modules_completed'] = len(current_execution['batch_results'])
                 # Create aggregated display
                 current_execution['results'] = self._create_batch_report()
+                
+                # If all 4 modules completed, reset batch mode
+                if current_execution['modules_completed'] >= 4:
+                    current_execution['is_batch'] = False
             else:
                 current_execution['results'] = self.results
                 
             current_execution['status'] = 'completed'
 
         except Exception as e:
+            import traceback
             self.error = str(e)
             current_execution['status'] = 'error'
             current_execution['error'] = str(e)
+            output_buffer = io.StringIO()
+            output_buffer.write(f"Thread Error: {str(e)}\n")
+            output_buffer.write(traceback.format_exc())
+            current_execution['results'] = output_buffer.getvalue()
 
     def _create_batch_report(self):
         """Create a formatted report of all batch results"""
@@ -186,6 +226,62 @@ def upload_images():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/list-output-images', methods=['GET'])
+def list_output_images():
+    """API endpoint to list output images"""
+    try:
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Outputs', 'Images')
+        
+        if not os.path.exists(output_dir):
+            response = make_response(jsonify({'images': []}))
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            return response
+        
+        # Get all image files
+        image_extensions = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'JPG', 'JPEG', 'PNG', 'GIF', 'BMP'}
+        images = []
+        
+        for filename in os.listdir(output_dir):
+            if '.' in filename:
+                ext = filename.rsplit('.', 1)[1].lower()
+                if ext in image_extensions:
+                    # Generate relative path for serving
+                    image_path = f'/images/{filename}'
+                    images.append(image_path)
+        
+        response = make_response(jsonify({'images': sorted(images, reverse=True)}))  # Latest first
+        # Add cache control headers to prevent caching
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/images/<filename>')
+def serve_image(filename):
+    """Serve image files from the output directory"""
+    try:
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Outputs', 'Images')
+        filepath = os.path.join(output_dir, filename)
+        
+        # Security check: ensure the filepath is within the output directory
+        if not os.path.abspath(filepath).startswith(os.path.abspath(output_dir)):
+            return jsonify({'error': 'Invalid path'}), 400
+        
+        if not os.path.exists(filepath):
+            return jsonify({'error': 'Image not found'}), 404
+        
+        return send_file(filepath, mimetype='image/png')
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/run-experiment', methods=['POST'])
 def run_experiment():
     """API endpoint to run an experiment"""
@@ -204,14 +300,44 @@ def run_experiment():
     if current_execution['status'] not in ['completed', 'error', 'idle', 'stopped']:
         return jsonify({'error': f'Invalid state: {current_execution["status"]}'}), 400
 
+    # Reset batch mode for individual module runs
+    current_execution['is_batch'] = False
+    current_execution['batch_results'] = {}
+    current_execution['modules_completed'] = 0
+    current_execution['total_modules'] = 0
+
+    # Get the most recently uploaded image for parallelism module
+    image_path = None
+    if module_name == 'parallelism':
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Outputs', 'Images')
+        if os.path.exists(output_dir):
+            # Get all image files sorted by modification time (newest first)
+            image_files = []
+            image_extensions = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'JPG', 'JPEG', 'PNG', 'GIF', 'BMP'}
+            
+            for filename in os.listdir(output_dir):
+                if '.' in filename:
+                    ext = filename.rsplit('.', 1)[1].lower()
+                    if ext in image_extensions:
+                        filepath = os.path.join(output_dir, filename)
+                        # Skip output_*.jpg files (results from previous runs)
+                        if not filename.startswith('output_'):
+                            image_files.append((filepath, os.path.getmtime(filepath)))
+            
+            if image_files:
+                # Get the most recently modified uploaded image
+                image_files.sort(key=lambda x: x[1], reverse=True)
+                image_path = image_files[0][0]
+
     # Start execution in background thread
-    exec_thread = ExecutionThread(module_name, parameters)
+    exec_thread = ExecutionThread(module_name, parameters, image_path=image_path)
     exec_thread.start()
 
     return jsonify({
         'success': True,
         'message': f'Started {module_name} experiment',
-        'module': module_name
+        'module': module_name,
+        'image_used': 'uploaded' if image_path else 'default'
     })
 
 
@@ -319,7 +445,8 @@ def download_results():
 @app.route('/api/graphs', methods=['GET'])
 def get_graphs():
     """Get available graphs"""
-    graphs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Outputs', 'Graphs')
+    # Match the path where graphs are actually saved in performance_module
+    graphs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'outputs', 'graphs')
     
     if not os.path.exists(graphs_dir):
         return jsonify({})
@@ -336,7 +463,7 @@ def get_graphs():
 @app.route('/graphs/<filename>')
 def get_graph_image(filename):
     """Serve graph images"""
-    graphs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Outputs', 'Graphs')
+    graphs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'outputs', 'graphs')
     filepath = os.path.join(graphs_dir, filename)
     
     # Security: ensure the file is within the graphs directory
@@ -352,7 +479,7 @@ def get_graph_image(filename):
 @app.route('/api/download-graphs', methods=['GET'])
 def download_graphs():
     """Download all graphs as zip"""
-    graphs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Outputs', 'Graphs')
+    graphs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'outputs', 'graphs')
     
     if not os.path.exists(graphs_dir) or not glob.glob(os.path.join(graphs_dir, '*.png')):
         return jsonify({'error': 'No graphs available'}), 404
@@ -405,4 +532,4 @@ def internal_error(error):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=True, host='127.0.0.1', port=5000, use_reloader=False)

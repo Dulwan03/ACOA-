@@ -1,6 +1,11 @@
 import os
 import math
 import matplotlib.pyplot as plt
+import sys
+
+# Add parent directory to path to import utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils import PROJECT_DIR
 
 RESULTS = []
 
@@ -29,20 +34,20 @@ def plot_parallelism_results():
     parallelism_results = [r for r in RESULTS if r["module"] == "Parallelism"]
 
     if not parallelism_results:
-        print("No parallelism results found to plot.")
+        print("No parallelism results found to plot.", flush=True)
         return
 
     thread_results = [r for r in parallelism_results if r["mode"] == "threading"]
     process_results = [r for r in parallelism_results if r["mode"] == "multiprocessing"]
 
     if not thread_results and not process_results:
-        print("No threading or multiprocessing results found.")
+        print("No threading or multiprocessing results found.", flush=True)
         return
 
     workers = sorted(set(r["workers"] for r in parallelism_results if r["workers"] > 0))
     amdahl = amdahl_prediction(workers)
 
-    os.makedirs("outputs/graphs", exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_DIR, "outputs/graphs"), exist_ok=True)
 
     if thread_results:
         tw = [r["workers"] for r in thread_results]
@@ -71,7 +76,7 @@ def plot_parallelism_results():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("outputs/graphs/parallelism_execution_time.png")
+    plt.savefig(os.path.join(PROJECT_DIR, "outputs/graphs/parallelism_execution_time.png"))
     plt.close()
 
     plt.figure(figsize=(8, 5))
@@ -86,7 +91,7 @@ def plot_parallelism_results():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("outputs/graphs/parallelism_speedup.png")
+    plt.savefig(os.path.join(PROJECT_DIR, "outputs/graphs/parallelism_speedup.png"))
     plt.close()
 
     plt.figure(figsize=(8, 5))
@@ -100,7 +105,7 @@ def plot_parallelism_results():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("outputs/graphs/parallelism_efficiency.png")
+    plt.savefig(os.path.join(PROJECT_DIR, "outputs/graphs/parallelism_efficiency.png"))
     plt.close()
 
     memory_results_thread = [r["memory_mb"] for r in thread_results]
@@ -117,22 +122,55 @@ def plot_parallelism_results():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("outputs/graphs/parallelism_memory.png")
+    plt.savefig(os.path.join(PROJECT_DIR, "outputs/graphs/parallelism_memory.png"))
     plt.close()
 
-    print("Graphs saved in outputs/graphs/")
+    print("Graphs saved in outputs/graphs/", flush=True)
 
 
 def print_results():
     if not RESULTS:
-        print("No results recorded.")
+        print("No results recorded.", flush=True)
         return
 
-    print("\nRecorded Results")
-    print("-" * 80)
+    print("\n", flush=True)
+    print("=" * 100, flush=True)
+    print("PERFORMANCE ANALYSIS RESULTS".center(100), flush=True)
+    print("=" * 100, flush=True)
+
+    # Group results by module
+    modules = {}
     for r in RESULTS:
-        print(
-            f"Module: {r['module']}, Mode: {r['mode']}, Workers: {r['workers']}, "
-            f"Time: {r['execution_time']:.4f}s, Speedup: {r['speedup']:.4f}, "
-            f"Efficiency: {r['efficiency']:.4f}, Memory: {r['memory_mb']:.4f} MB"
-        )
+        module = r['module']
+        if module not in modules:
+            modules[module] = []
+        modules[module].append(r)
+
+    # Print results for each module
+    for module_name in sorted(modules.keys()):
+        module_results = modules[module_name]
+        
+        print(f"\n{'█' * 100}", flush=True)
+        print(f"  MODULE: {module_name}", flush=True)
+        print(f"{'█' * 100}\n", flush=True)
+        
+        # Table header
+        print(f"{'Mode':<20} {'Workers':<10} {'Time (s)':<15} {'Speedup':<12} {'Efficiency':<12} {'Memory (MB)':<15}", flush=True)
+        print("-" * 100, flush=True)
+        
+        # Table rows
+        for r in module_results:
+            mode = str(r['mode'])[:20]
+            workers = str(r['workers'])
+            exec_time = f"{r['execution_time']:.4f}"
+            speedup = f"{r['speedup']:.4f}"
+            efficiency = f"{r['efficiency']:.4f}"
+            memory = f"{r['memory_mb']:.2f}"
+            
+            print(f"{mode:<20} {workers:<10} {exec_time:<15} {speedup:<12} {efficiency:<12} {memory:<15}", flush=True)
+        
+        print("", flush=True)
+
+    print("=" * 100, flush=True)
+    print(f"Total Results Recorded: {len(RESULTS)}".center(100), flush=True)
+    print("=" * 100 + "\n", flush=True)

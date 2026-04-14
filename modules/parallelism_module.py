@@ -2,8 +2,17 @@ from PIL import Image
 import numpy as np
 import threading
 import multiprocessing
-from utils import timed_run, calculate_speedup, calculate_efficiency, ensure_directories
+import os
+import sys
+from utils import timed_run, calculate_speedup, calculate_efficiency, ensure_directories, PROJECT_DIR
 from modules.performance_module import record_result
+
+# Set multiprocessing start method for Windows compatibility
+if sys.platform == 'win32' and multiprocessing.get_start_method(allow_none=True) != 'spawn':
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
 
 
 def load_image(path: str):
@@ -55,12 +64,16 @@ def grayscale_threaded(image: np.ndarray, num_threads: int) -> np.ndarray:
     return np.vstack(results)
 
 
-def grayscale_process_chunk(args):
-    chunk = args
+def grayscale_process_chunk(chunk: np.ndarray) -> np.ndarray:
+    """Process a chunk of image data - must be picklable for multiprocessing"""
     return grayscale_chunk(chunk)
 
 
 def grayscale_multiprocessing(image: np.ndarray, num_processes: int) -> np.ndarray:
+    """
+    Process image using multiprocessing with Windows compatibility.
+    Falls back to threading if multiprocessing fails.
+    """
     height = image.shape[0]
     chunk_size = height // num_processes
     chunks = []
@@ -70,17 +83,39 @@ def grayscale_multiprocessing(image: np.ndarray, num_processes: int) -> np.ndarr
         end_row = height if i == num_processes - 1 else (i + 1) * chunk_size
         chunks.append(image[start_row:end_row])
 
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        results = pool.map(grayscale_process_chunk, chunks)
+    try:
+        # Try multiprocessing with Windows compatibility settings
+        ctx = multiprocessing.get_context('spawn')
+        with ctx.Pool(processes=num_processes, maxtasksperchild=1) as pool:
+            # Use map_async to handle timeout properly
+            async_result = pool.map_async(grayscale_process_chunk, chunks)
+            # Get results with 30 second timeout
+            results = async_result.get(timeout=30)
+        return np.vstack(results)
+    except (TimeoutError, KeyboardInterrupt, BrokenPipeError, OSError, Exception) as e:
+        # Fallback to threading if multiprocessing fails
+        print(f"    [Note: Multiprocessing encountered issue ({type(e).__name__}), using threading instead]")
+        return grayscale_threaded(image, num_processes)
 
-    return np.vstack(results)
 
-
-def run_parallelism_experiment():
+def run_parallelism_experiment(input_image_path=None):
+    """
+    Run the parallelism experiment.
+    If input_image_path is provided, use that image; otherwise use default data/input.jpg
+    """
     ensure_directories()
 
-    input_path = "data/input.jpg"
-    output_seq = "outputs/images/output_sequential.jpg"
+    # Use provided image path or default
+    if input_image_path is None:
+        input_path = os.path.join(PROJECT_DIR, "data/input.jpg")
+    else:
+        input_path = input_image_path
+    
+    # Verify the image exists
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input image not found: {input_path}")
+    
+    output_seq = os.path.join(PROJECT_DIR, "outputs/images/output_sequential.jpg")
 
     print("\nRunning Parallelism Module...")
 
@@ -101,9 +136,9 @@ def run_parallelism_experiment():
 
     print(f"Sequential Time: {seq_time:.4f}s")
 
-    for workers in [2, 4, 8]:
+    for workers in [2, 6, 4, 8]:
         thread_result, thread_time, thread_memory = timed_run(grayscale_threaded, image, workers)
-        save_image(thread_result, f"outputs/images/output_thread_{workers}.jpg")
+        save_image(thread_result, os.path.join(PROJECT_DIR, f"outputs/images/output_thread_{workers}.jpg"))
 
         thread_speedup = calculate_speedup(seq_time, thread_time)
         thread_eff = calculate_efficiency(thread_speedup, workers)
@@ -125,7 +160,7 @@ def run_parallelism_experiment():
 
     for workers in [2, 4, 8]:
         proc_result, proc_time, proc_memory = timed_run(grayscale_multiprocessing, image, workers)
-        save_image(proc_result, f"outputs/images/output_process_{workers}.jpg")
+        save_image(proc_result, os.path.join(PROJECT_DIR, f"outputs/images/output_process_{workers}.jpg"))
 
         proc_speedup = calculate_speedup(seq_time, proc_time)
         proc_eff = calculate_efficiency(proc_speedup, workers)
